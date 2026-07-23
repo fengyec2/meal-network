@@ -153,13 +153,14 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
         roam: true,
         zoom: 1.15,
         center: [104.195397, 35.86166],
+        selectedMode: 'single',
         label: {
-          show: showPinLabels,
+          show: true,
           fontSize: 11,
           color: '#d1d1d1',
           formatter: (params: any) => {
             const list = provinceMap.get(params.name) || [];
-            if (list.length > 0) {
+            if (showPinLabels && list.length > 0) {
               return `${params.name}\n(${list.length})`;
             }
             return params.name;
@@ -202,16 +203,54 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
           name: '蹭饭分布',
           type: 'map',
           geoIndex: 0,
+          selectedMode: 'single',
           data: mapData
         }
       ]
     };
   }, [provinceMap, selectedProvince, themeConfig, maxFriendsCount, showPinLabels]);
 
+  // Synchronize React selectedProvince state with ECharts instance selection state
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const echartInstance = chartRef.current.getEchartsInstance();
+    if (!echartInstance) return;
+
+    // Clear all existing selections in ECharts
+    CHINA_PROVINCES.forEach(prov => {
+      echartInstance.dispatchAction({
+        type: 'geoUnSelect',
+        name: prov
+      });
+      echartInstance.dispatchAction({
+        type: 'unselect',
+        name: prov,
+        seriesIndex: 0
+      });
+    });
+
+    // If a province is selected, highlight it via ECharts action
+    if (selectedProvince) {
+      echartInstance.dispatchAction({
+        type: 'geoSelect',
+        name: selectedProvince
+      });
+      echartInstance.dispatchAction({
+        type: 'select',
+        name: selectedProvince,
+        seriesIndex: 0
+      });
+    }
+  }, [selectedProvince]);
+
   // Handle map click
   const onChartClick = (params: any) => {
     if (params.name) {
-      onSelectProvince(params.name);
+      if (selectedProvince === params.name) {
+        onSelectProvince('');
+      } else {
+        onSelectProvince(params.name);
+      }
     }
   };
 
@@ -219,9 +258,16 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
   const handleResetZoom = () => {
     if (chartRef.current) {
       const echartInstance = chartRef.current.getEchartsInstance();
-      echartInstance.dispatchAction({
-        type: 'geoSelect',
-        name: ''
+      CHINA_PROVINCES.forEach(prov => {
+        echartInstance.dispatchAction({
+          type: 'geoUnSelect',
+          name: prov
+        });
+        echartInstance.dispatchAction({
+          type: 'unselect',
+          name: prov,
+          seriesIndex: 0
+        });
       });
       echartInstance.setOption({
         geo: {
@@ -230,6 +276,7 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
         }
       });
     }
+    onSelectProvince('');
   };
 
   // Toggle fullscreen
@@ -339,6 +386,7 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
       <ReactECharts
         ref={chartRef}
         option={chartOption}
+        notMerge={true}
         style={{ height: '100%', width: '100%' }}
         onEvents={{ click: onChartClick }}
       />
