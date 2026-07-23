@@ -1,0 +1,6 @@
+{
+  "name": "全国蹭饭地图",
+  "description": "基于导入XLSX名单自动生成全国省份蹭饭地图，动态展示各省好友录取学校与联系备注",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
