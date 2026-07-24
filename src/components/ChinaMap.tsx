@@ -295,14 +295,16 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
     }
   };
 
-  // Handle search province shortcut
+  // Handle search — first try friend name, then province name
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
-    const query = searchQuery.trim();
-    const matched = CHINA_PROVINCES.find(p => p.includes(query) || query.includes(p));
-    if (matched) {
-      onSelectProvince(matched);
+    const query = searchQuery.trim().toLowerCase();
+    // ponytail: search friends by name first; fallback to province match
+    const matchingFriend = friends.find(f => f.name.toLowerCase().includes(query) || query.includes(f.name.toLowerCase()));
+    const matchedProv = matchingFriend ? matchingFriend.province : CHINA_PROVINCES.find(p => p.includes(query) || query.includes(p));
+    if (matchedProv) {
+      onSelectProvince(matchedProv);
       setSearchQuery('');
     }
   };
@@ -327,7 +329,7 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="搜索省份 (如: 浙江、四川)..."
+            placeholder="搜索人名或省份 (如: 小王、浙江)..."
             className="w-full text-xs bg-transparent text-[#d1d1d1] placeholder-[#6e6e76] focus:outline-none"
           />
           <button type="submit" className="text-xs bg-[#c5a059] hover:bg-[#d4af37] text-[#0c0c0e] px-2.5 py-0.5 rounded-md font-bold transition">
