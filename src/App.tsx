@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { Friend, MapThemeId } from './types';
 import { getStoredFriends, saveFriends } from './utils/storage';
 import { parseExcelFile, parseExcelArrayBuffer, downloadExcelTemplate } from './utils/excelParser';
+import { fetchFriends } from './api/database';
 import { Navbar } from './components/Navbar';
 import { ChinaMap } from './components/ChinaMap';
 import { ProvinceDrawer } from './components/ProvinceDrawer';
@@ -33,9 +34,22 @@ export default function App() {
     }, 4000);
   };
 
-  // Check for data.xlsx in root directory on startup
+  // Load friends: DB first (neon serverless), fallback to data.xlsx, then localStorage
   useEffect(() => {
-    async function checkAndLoadRootXlsx() {
+    async function loadFriends() {
+      // Try direct database connection via Neon serverless driver
+      try {
+        const data = await fetchFriends();
+        if (data.length > 0) {
+          setFriends(data as Friend[]);
+          setHasRootDataXlsx(true); // true means "data loaded from external source"
+          return;
+        }
+      } catch (err) {
+        console.log('DB not configured, trying other sources');
+      }
+
+      // Fallback 1: check for data.xlsx in root directory
       try {
         const res = await fetch('/data.xlsx', { method: 'GET', cache: 'no-cache' });
         if (res.ok) {
@@ -55,10 +69,12 @@ export default function App() {
       } catch (err) {
         console.log('No root data.xlsx detected');
       }
+
+      // Fallback 2: localStorage
       setHasRootDataXlsx(false);
     }
 
-    checkAndLoadRootXlsx();
+    loadFriends();
   }, []);
 
   // Sync state to localStorage whenever friends list changes
