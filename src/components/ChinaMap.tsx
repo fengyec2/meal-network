@@ -5,7 +5,7 @@ import { chinaGeoJson } from '../data/chinaGeoJson';
 import { CHINA_PROVINCES } from '../data/universityProvinceMap';
 import { Friend, MapThemeId } from '../types';
 import { MAP_THEMES } from '../data/mapThemes';
-import { Maximize2, Minimize2, RotateCcw, Search, MapPin, Info, Sparkles } from 'lucide-react';
+import { Maximize2, Minimize2, RotateCcw, Search, MapPin, Info, Sparkles, Users } from 'lucide-react';
 
 interface ChinaMapProps {
   friends: Friend[];
@@ -27,9 +27,12 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
 }) => {
   const chartRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const graduationRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showPinLabels, setShowPinLabels] = useState(true);
+  const [showGraduation, setShowGraduation] = useState(false);
+  const [graduationTick, setGraduationTick] = useState(0); // force rebuild graduation overlay on map pan
 
   // Group friends by province
   const provinceMap = useMemo(() => {
@@ -309,6 +312,147 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
     }
   };
 
+  // Compute graduation overlay positions: map province centers to screen coords,
+  // then project outward to place labels and curved lines
+  const { lines, labels } = useMemo(() => {
+    if (!showGraduation || !chartRef.current) return { lines: [] as any[], labels: [] as any[] };
+
+    const echartsInstance = chartRef.current.getEchartsInstance();
+    if (!echartsInstance) return { lines: [], labels: [] };
+
+    // Get province centers from GeoJson
+    const centers: Map<string, [number, number]> = new Map();
+    if (chinaGeoJson?.features) {
+      for (const feature of chinaGeoJson.features as any[]) {
+        const name = feature.properties?.name;
+        const center = feature.properties?.center;
+        if (name && center && Array.isArray(center)) {
+          centers.set(name, center as [number, number]);
+        }
+      }
+    }
+
+    const rect = containerRef.current?.getBoundingClientRect();
+    const mapW = rect?.width || 900;
+    const mapH = rect?.height || 700;
+
+    // Only include provinces that have friends
+    interface ProvEntry { name: string; lngLat: [number, number]; friends: Friend[]; screenPos: [number, number] | null }
+    const validProvs: ProvEntry[] = [];
+    
+    CHINA_PROVINCES.forEach(prov => {
+      const provFriends = provinceMap.get(prov) || [];
+      if (provFriends.length === 0) return;
+      const center = centers.get(prov);
+      if (!center) return;
+      const sp = echartsInstance.convertToPixel(
+        { coordSys: 'geo', geoIndex: 0 }, 
+        center
+      );
+      validProvs.push({ name: prov, lngLat: center, friends: provFriends, screenPos: sp ? (sp as [number, number]) : null });
+    });
+
+    const maxTextHeight = 11;
+    const maxLabelWidth = Math.min(mapW * 0.22, 250);
+    const pad = 16;
+    const lineH = (p: ProvEntry) => p.friends.length * maxTextHeight + 18; // province header + entries + padding
+    const entryH = (p: ProvEntry) => Math.ceil(p.friends.length / 2) * maxTextHeight + 14;
+
+    // Simple placement: project outward from map center along radial direction
+    const mapCx = mapW / 2;
+    const mapCy = mapH / 2;
+
+    const projectedLines: any[] = [];
+    const projectedLabels: any[] = [];
+
+    // Try to fit labels without overlap using a simple greedy packing
+    interface LabelSlot { x: number; y: number; w: number; h: number }
+    const occupiedSlots: LabelSlot[] = [];
+    
+    const canPlace = (nx: number, ny: number, nw: number, nh: number): boolean => {
+      for (const s of occupiedSlots) {
+        if (!(nx + nw < s.x || nx > s.x + s.w || ny + nh < s.y || ny > s.y + s.h)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const tryPlace = (entry: ProvEntry, side: 'left' | 'right', row: number): { x: number; y: number; lineEnd: [number, number] } | null => {
+      if (!entry.screenPos) return null;
+      const [sx, sy] = entry.screenPos;
+      const h = entryH(entry);
+      
+      // Position: push outward along radial direction, stagger by row
+      const radialX = sx - mapCx;
+      const radialY = sy - mapCy;
+      const dist = Math.sqrt(radialX * radialX + radialY * radialY) || 1;
+      
+      // Push factor: how far outside the map edge to place label
+      const pushDist = 40 + row * 15;
+      const offsetX = (radialX / dist) * pushDist;
+      const offsetY = (radialY / dist) * pushDist * 0.3; // Less vertical offset for subtlety
+      
+      let lx: number, ly: number;
+      
+      if (side === 'left') {
+        lx = sx - 15 - maxLabelWidth + offsetX * 0.5;
+      } else {
+        lx = sx + 15 + offsetX * 0.5;
+      }
+      ly = sy + offsetY;
+      
+      // Clamp to visible area
+      lx = Math.max(pad, Math.min(lx, mapW - maxLabelWidth - pad));
+      ly = Math.max(pad, Math.min(ly, mapH - h - pad));
+
+      if (!canPlace(lx, ly, maxLabelWidth, h)) {
+        // Fallback: just stack vertically from top
+        ly = pad + occupiedSlots.length * (h + 6);
+        lx = side === 'left' ? pad : mapW - maxLabelWidth - pad;
+        if (!canPlace(lx, ly, maxLabelWidth, h)) return null;
+      }
+
+      // Try to find a better non-overlapping position
+      occupiedSlots.push({ x: lx, y: ly, w: maxLabelWidth, h });
+      
+      const lineEndX = side === 'left' ? lx + maxLabelWidth + 5 : lx - 5;
+      const lineEndY = ly + h / 2;
+
+      return { x: lx, y: ly, lineEnd: [lineEndX, lineEndY] };
+    };
+
+    validProvs.forEach((entry, i) => {
+      if (!entry.screenPos) return;
+      
+      const side = entry.name === '台湾' || entry.name === '香港' || entry.name === '澳门' || entry.lngLat[0] >= 108 ? 'right' : 'left';
+      const pos = tryPlace(entry, side, i);
+      if (!pos) return;
+
+      const [sx, sy] = entry.screenPos;
+      const [lx, ly, lEx, lEy] = [pos.x, pos.y, pos.lineEnd[0], pos.lineEnd[1]];
+      
+      // Build curved path: quadratic bezier from province center to label edge
+      const cpX = (sx + lEx) / 2;
+      const cpY = (sy + lEy) / 2 + 20; // Slight curve downward
+      
+      projectedLines.push({
+        d: `M ${sx} ${sy} Q ${cpX} ${cpY} ${lEx} ${lEy}`,
+        province: entry.name,
+      });
+
+      projectedLabels.push({
+        x: pos.x,
+        y: pos.y,
+        width: maxLabelWidth,
+        text: entry.friends.map(f => `${f.name} · ${f.school}`).join('\n'),
+        province: entry.name,
+      });
+    });
+
+    return { lines: projectedLines, labels: projectedLabels };
+  }, [showGraduation, provinceMap, graduationTick]);
+
   return (
     <div 
       ref={containerRef}
@@ -348,6 +492,20 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
             }`}
           >
             {showPinLabels ? '显示省份人数' : '仅显示省名'}
+          </button>
+
+          {/* Graduation Toggle */}
+          <button
+            onClick={() => setShowGraduation(!showGraduation)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-medium border shadow-md backdrop-blur-md transition flex items-center gap-1.5 ${
+              showGraduation 
+                ? 'bg-[#1e1e21] text-[#c5a059] border-[#c5a059]' 
+                : 'bg-[#141416]/90 text-[#6e6e76] border-[#2a2a2e] hover:text-[#d1d1d1]'
+            }`}
+            title="毕业去向图（姓名+院校连线）"
+          >
+            <Users className="w-3.5 h-3.5" />
+            {showGraduation ? '去向图 ON' : '去向图'}
           </button>
 
           <button
@@ -390,8 +548,53 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
         option={chartOption}
         notMerge={true}
         style={{ height: '100%', width: '100%' }}
-        onEvents={{ click: onChartClick }}
+        onEvents={{ click: onChartClick, georoam: () => showGraduation && setGraduationTick(t => t + 1) }}
       />
+
+      {/* Graduation Overlay: SVG lines + HTML labels */}
+      {showGraduation && (
+        <div
+          ref={graduationRef}
+          className="absolute inset-0 pointer-events-none overflow-visible"
+          style={{ zIndex: 5 }}
+        >
+          <svg
+            className="absolute inset-0 w-full h-full overflow-visible"
+            style={{ pointerEvents: 'none' }}
+          >
+            {lines.map((line: any) => (
+              <path
+                key={line.province}
+                d={line.d}
+                fill="none"
+                stroke="rgba(197, 160, 89, 0.3)"
+                strokeWidth="1"
+                strokeDasharray="4 3"
+              />
+            ))}
+          </svg>
+          
+          {labels.map((label: any) => (
+            <div
+              key={label.province}
+              className="absolute pointer-events-auto"
+              style={{
+                left: label.x,
+                top: label.y,
+                maxWidth: 250,
+                color: '#c5a059',
+                fontSize: '10px',
+                lineHeight: '14px',
+              }}
+            >
+              <div className="text-[#6e6e76] text-[9px] mb-0.5 font-bold tracking-wide border-b border-[#2a2a2e] pb-0.5">{label.province}</div>
+              {label.text.split('\n').map((line: string, j: number) => (
+                <div key={j} className="whitespace-nowrap text-[#c5a059]/90 truncate" title={line}>{line}</div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Floating Bottom Info Tip */}
       <div className="absolute bottom-4 right-4 z-10 bg-[#141416]/80 backdrop-blur-md px-3 py-1.5 rounded-xl border border-[#2a2a2e] text-[11px] text-[#6e6e76] shadow-xs hidden sm:flex items-center gap-1.5">
